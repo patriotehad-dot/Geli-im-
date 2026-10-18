@@ -1826,7 +1826,8 @@ export default defineConfig(
 						'vs/platform/*/~',
 						'vs/editor/~',
 						'@vscode/tree-sitter-wasm', // node module allowed even in /common/
-						'@vscode/diff' // type import (loaded at runtime via resolveAmdNodeModulePath)
+						'@vscode/diff', // type import (loaded at runtime via resolveAmdNodeModulePath)
+						'@vscode/editor-view' // type import (loaded at runtime via resolveAmdNodeModulePath)
 					]
 				},
 				{
