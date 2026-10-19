@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { addDisposableListener, getWindow } from '../../../../../base/browser/dom.js';
+import { groupAdjacentBy } from '../../../../../base/common/arrays.js';
 import { assert } from '../../../../../base/common/assert.js';
 import { DeferredPromise, RunOnceScheduler, timeout } from '../../../../../base/common/async.js';
 import { Emitter } from '../../../../../base/common/event.js';
@@ -14,11 +15,13 @@ import { themeColorFromId } from '../../../../../base/common/themables.js';
 import { assertType } from '../../../../../base/common/types.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { EditOperation, ISingleEditOperation } from '../../../../../editor/common/core/editOperation.js';
-import { StringEdit } from '../../../../../editor/common/core/edits/stringEdit.js';
+import { StringEdit, StringReplacement } from '../../../../../editor/common/core/edits/stringEdit.js';
 import { IRange, Range } from '../../../../../editor/common/core/range.js';
 import { LineRange } from '../../../../../editor/common/core/ranges/lineRange.js';
+import { OffsetRange } from '../../../../../editor/common/core/ranges/offsetRange.js';
+import { StringText } from '../../../../../editor/common/core/text/abstractText.js';
 import { IDocumentDiff, nullDocumentDiff } from '../../../../../editor/common/diff/documentDiffProvider.js';
-import { DetailedLineRangeMapping } from '../../../../../editor/common/diff/rangeMapping.js';
+import { DetailedLineRangeMapping, getLineRangeMapping, RangeMapping } from '../../../../../editor/common/diff/rangeMapping.js';
 import { TextEdit, VersionedExtensionId } from '../../../../../editor/common/languages.js';
 import { IModelDeltaDecoration, ITextModel, ITextSnapshot, MinimapPosition, OverviewRulerLane } from '../../../../../editor/common/model.js';
 import { ModelDecorationOptions } from '../../../../../editor/common/model/textModel.js';
@@ -81,7 +84,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
 	public get allEditsAreFromUs() {
 		return this._allEditsAreFromUs;
 	}
-	private _isExternalEditInProgress: (() => boolean) | undefined;
+	private _isExternalEditInProgress: ((event: IModelContentChangedEvent) => boolean) | undefined;
 	private _diffOperation: Promise<IDocumentDiff | undefined> | undefined;
 	private _diffOperationIds: number = 0;
 
@@ -127,7 +130,14 @@ export class ChatEditingTextModelChangeService extends Disposable {
 		private readonly originalModel: ITextModel,
 		private readonly modifiedModel: ITextModel,
 		private readonly state: IObservable<ModifiedFileEntryState>,
-		isExternalEditInProgress: (() => boolean) | undefined,
+		/** Whether a change of the modified model is an external edit, attributed to the agent. */
+		isExternalEditInProgress: ((event: IModelContentChangedEvent) => boolean) | undefined,
+		/**
+		 * Whether a user edit of an agent change keeps that change, so that the
+		 * user owns the resulting text and undoing never discards it. Otherwise
+		 * the user's text becomes part of the agent change.
+		 */
+		private readonly _userEditsKeepAgentChanges: boolean,
 		@IEditorWorkerService private readonly _editorWorkerService: IEditorWorkerService,
 		@IAccessibilitySignalService private readonly _accessibilitySignalService: IAccessibilitySignalService,
 	) {
@@ -352,7 +362,7 @@ export class ChatEditingTextModelChangeService extends Disposable {
 
 	private _mirrorEdits(event: IModelContentChangedEvent) {
 		const edit = offsetEditFromContentChanges(event.changes);
-		const isExternalEdit = this._isExternalEditInProgress?.();
+		const isExternalEdit = this._isExternalEditInProgress?.(event);
 
 		if (this._isEditFromUs || isExternalEdit) {
 			const e_sum = this._originalToModifiedEdit;
@@ -378,10 +388,15 @@ export class ChatEditingTextModelChangeService extends Disposable {
 			// e_ai - ai edits
 			// e_user - user edits
 			//
-			const e_ai = this._originalToModifiedEdit;
+			let e_ai = this._originalToModifiedEdit;
 			const e_user = edit;
 
-			const e_user_r = e_user.tryRebase(e_ai.inverse(this.originalModel.getValue()));
+			let e_user_r = e_user.tryRebase(e_ai.inverse(this.originalModel.getValue()));
+
+			if (e_user_r === undefined && this._userEditsKeepAgentChanges) {
+				e_user_r = this._keepAgentChangesEditedBy(e_user);
+				e_ai = this._originalToModifiedEdit;
+			}
 
 			if (e_user_r === undefined) {
 				// user edits overlaps/conflicts with AI edits
@@ -399,6 +414,50 @@ export class ChatEditingTextModelChangeService extends Disposable {
 				this._didUserEditModel.fire();
 			}
 		}
+	}
+
+	/**
+	 * Moves the agent changes that a user edit overlaps into the original
+	 * model, as if they were kept, and returns the user edit rebased onto the
+	 * new original. Changes are kept whole, as the editor shows them, so that
+	 * undoing never mixes their text with the user's. Undoing a hunk overlaps
+	 * its own changes, which the rebased edit then reverts in the original as
+	 * well.
+	 */
+	private _keepAgentChangesEditedBy(userEdit: StringEdit): StringEdit | undefined {
+		const original = this.originalModel.getValue();
+		const originalText = new StringText(original);
+		const modifiedText = new StringText(this._originalToModifiedEdit.apply(original));
+		let modifiedDelta = 0;
+		const replacements = this._originalToModifiedEdit.replacements.map(replacement => {
+			const modifiedRange = OffsetRange.ofStartAndLength(replacement.replaceRange.start + modifiedDelta, replacement.newText.length);
+			modifiedDelta += replacement.newText.length - replacement.replaceRange.length;
+			// Rebasing onto the replacement alone fails exactly when the user edit overlaps it.
+			const inverse = new StringEdit([new StringReplacement(modifiedRange, replacement.replaceRange.substring(original))]);
+			const ranges = new RangeMapping(originalText.getTransformer().getRange(replacement.replaceRange), modifiedText.getTransformer().getRange(modifiedRange));
+			return { replacement, isEdited: userEdit.tryRebase(inverse) === undefined, lines: getLineRangeMapping(ranges, originalText, modifiedText) };
+		});
+		const kept: StringReplacement[] = [];
+		const remaining: StringReplacement[] = [];
+		let keptDelta = 0;
+		// Like the diff, a change joins the replacements on adjacent lines.
+		for (const change of groupAdjacentBy(replacements, (a, b) => a.lines.original.intersectsOrTouches(b.lines.original) || a.lines.modified.intersectsOrTouches(b.lines.modified))) {
+			const keep = change.some(({ isEdited }) => isEdited);
+			for (const { replacement } of change) {
+				if (keep) {
+					kept.push(replacement);
+					keptDelta += replacement.newText.length - replacement.replaceRange.length;
+				} else {
+					remaining.push(new StringReplacement(replacement.replaceRange.delta(keptDelta), replacement.newText));
+				}
+			}
+		}
+		if (kept.length === 0) {
+			return undefined;
+		}
+		this.originalModel.applyEdits(offsetEditToEditOperations(new StringEdit(kept), this.originalModel));
+		this._originalToModifiedEdit = new StringEdit(remaining);
+		return userEdit.tryRebase(this._originalToModifiedEdit.inverse(this.originalModel.getValue()));
 	}
 
 	private async _keepHunk(change: DetailedLineRangeMapping): Promise<boolean> {
