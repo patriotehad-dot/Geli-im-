@@ -111,7 +111,7 @@ type CatalogSearchResult = Awaited<ReturnType<CopilotClient['rpc']['catalog']['s
 type CatalogSearchSucceeded = Extract<CatalogSearchResult, { readonly kind: 'succeeded' }>;
 type CatalogCandidate = CatalogSearchSucceeded['candidates'][number];
 type InstallableCatalogCandidate = Extract<CatalogCandidate, { readonly kind: 'ai-skill' | 'mcp-server' }>;
-type CatalogCandidateKind = InstallableCatalogCandidate['kind'];
+type CatalogCandidateKind = CatalogCandidate['kind'];
 type McpPlanInstallSource = Parameters<CopilotClient['rpc']['mcp']['planInstall']>[0]['source'];
 type McpServerCardReference = Parameters<CopilotClient['rpc']['mcp']['prepareInstall']>[0]['source'];
 
@@ -195,11 +195,12 @@ export class CopilotCustomizationInstallations extends Disposable {
 	}
 
 	async search(session: URI, request: IAgentCustomizationMarketplaceSearchRequest): Promise<IAgentCustomizationMarketplaceSearchResult> {
-		if (!request.query.trim()) {
-			if (request.mediaType && request.mediaType !== copilotPluginMediaType) {
-				return { kind: 'page', items: [] };
+		if (!request.query.trim() && !request.canvasDiscovery) {
+			if (request.mediaType !== copilotPluginMediaType) {
+				return request.mediaType
+					? { kind: 'page', items: [] }
+					: this.browseFeaturedPlugins(await this.getClient(), request);
 			}
-			return this.browseFeaturedPlugins(await this.getClient(), request);
 		}
 		const visiblePolicySessionId = this.getPolicySessionId(session);
 		if (!visiblePolicySessionId && !this.createPolicySession) {
@@ -212,11 +213,12 @@ export class CopilotCustomizationInstallations extends Disposable {
 			retainedCursor?.dispose();
 			throw new Error(localize('copilot.customizationMarketplace.cursorExpired', "This catalog page expired. Start the search again."));
 		}
-		const kinds = retainedCursor?.kinds ?? this.getCatalogKinds(request.mediaType);
+		let kinds = retainedCursor?.kinds ?? this.getCatalogKinds(request.mediaType);
 		if (kinds.length === 0) {
 			retainedCursor?.dispose();
 			return { kind: 'page', items: [] };
 		}
+		let canRetryWithoutPlugins = !retainedCursor && request.mediaType === undefined && kinds.includes('plugin');
 		const query = retainedCursor?.query ?? request.query;
 		const limit = retainedCursor?.limit ?? request.limit;
 		let page = retainedCursor ? { token: retainedCursor.token, number: retainedCursor.page } : undefined;
@@ -225,7 +227,9 @@ export class CopilotCustomizationInstallations extends Disposable {
 				const search = await client.rpc.catalog.search({
 					contract: {
 						protocolVersion: 3,
-						requiredCapabilities: catalogSearchCapabilities,
+						requiredCapabilities: kinds.includes('plugin')
+							? [...catalogSearchCapabilities, 'agent-plugin-discovery']
+							: catalogSearchCapabilities,
 					},
 					policySessionId,
 					query,
@@ -235,6 +239,11 @@ export class CopilotCustomizationInstallations extends Disposable {
 				});
 				if (search.kind !== 'succeeded') {
 					if (search.kind === 'negotiation-refused' || search.kind === 'unsupported-kind') {
+						if (canRetryWithoutPlugins) {
+							canRetryWithoutPlugins = false;
+							kinds = kinds.filter(kind => kind !== 'plugin');
+							continue;
+						}
 						return { kind: 'unavailable', reason: 'unsupported' };
 					}
 					if (search.kind === 'authentication-required') {
@@ -242,9 +251,11 @@ export class CopilotCustomizationInstallations extends Disposable {
 					}
 					throw new Error(search.message);
 				}
-				const items = search.candidates
-					.filter(candidate => this.isInstallableCatalogCandidate(candidate))
-					.map(candidate => this.retainCatalogCandidate(client, policySessionId, search.searchId, candidate));
+				const items = search.candidates.flatMap(candidate => candidate.kind === 'plugin'
+					? [this.toPluginCatalogItem(candidate)]
+					: this.isInstallableCatalogCandidate(candidate)
+						? [this.retainCatalogCandidate(client, policySessionId, search.searchId, candidate)]
+						: []);
 				if (items.length || !search.pagination?.hasNextPage) {
 					const nextCursor = search.pagination?.hasNextPage
 						? this.retainCatalogCursor(client, policySessionId, query, limit, kinds, search.pagination.token, search.pagination.currentPage + 1)
@@ -745,19 +756,36 @@ export class CopilotCustomizationInstallations extends Disposable {
 
 	private getCatalogKinds(mediaType: string | undefined): readonly CatalogCandidateKind[] {
 		switch (mediaType) {
-			case undefined: return ['ai-skill', 'mcp-server'];
+			case undefined: return ['ai-skill', 'mcp-server', 'plugin'];
 			case 'application/ai-skill': return ['ai-skill'];
 			case 'application/mcp-server+json': return ['mcp-server'];
-			case copilotPluginMediaType: return [];
+			case copilotPluginMediaType: return ['plugin'];
 			default: return [];
 		}
 	}
 
-	private toCatalogKinds(kinds: readonly CatalogCandidateKind[]): [CatalogCandidateKind] | [CatalogCandidateKind, CatalogCandidateKind] {
+	private toCatalogKinds(kinds: readonly CatalogCandidateKind[]): [CatalogCandidateKind] | [CatalogCandidateKind, CatalogCandidateKind] | [CatalogCandidateKind, CatalogCandidateKind, CatalogCandidateKind] {
 		switch (kinds.length) {
 			case 1: return [kinds[0]];
-			default: return [kinds[0], kinds[1]];
+			case 2: return [kinds[0], kinds[1]];
+			default: return [kinds[0], kinds[1], kinds[2]];
 		}
+	}
+
+	private toPluginCatalogItem(candidate: Extract<CatalogCandidate, { readonly kind: 'plugin' }>): IAgentCustomizationMarketplaceSearchItem {
+		return {
+			selectionId: `plugin:${candidate.identity}`,
+			kind: 'plugin',
+			displayName: candidate.displayName,
+			description: candidate.description,
+			publisher: candidate.publisher,
+			version: candidate.version,
+			repository: candidate.source?.repository,
+			path: candidate.source?.path,
+			tags: candidate.compatibilityTags,
+			installable: false,
+			unavailableMessage: localize('copilot.customizationMarketplace.pluginInstallUnavailable', "Install this plugin from a configured marketplace or its repository."),
+		};
 	}
 
 	private retainCatalogCandidate(client: ICopilotCustomizationInstallationClient, policySessionId: string, searchId: string, candidate: InstallableCatalogCandidate): IAgentCustomizationMarketplaceSearchItem {
