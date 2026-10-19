@@ -117,6 +117,7 @@ export enum ChatConfiguration {
 	WelcomePageSignInEnabled = 'chat.welcomePage.signIn.enabled',
 	TitleBarOpenInAgentsWindowEnabled = 'chat.titleBar.openInAgentsWindow.enabled',
 	OpenInAgentsWindowTransferDraft = 'chat.experimental.openInAgentsWindow.transferDraft',
+	OpenInEditorPreserveHiddenChat = 'chat.experimental.openInEditor.preserveHiddenChat',
 	AgentsParallelWorkBannerEnabled = 'chat.agentsParallelWorkBanner.enabled',
 	AgentsWindowBannerEnabled = 'chat.agentsWindowBanner.enabled',
 	AgentsWindowBannerDeveloperMode = 'chat.agentsWindowBanner.developerMode',
