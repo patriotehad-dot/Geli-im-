@@ -59,11 +59,9 @@ there is no update service metadata to compare against.
 
 ### Timeouts
 
-Extension installation makes at most three attempts, each allowing 30 seconds to click Install,
-30 seconds for installation to start, and one minute to wait for completion, with a five-second delay
-between attempts. These waits total at most 6 minutes 10 seconds, leaving room for setup and cleanup
-within the default ten-minute test timeout. Mocha does not cancel timed-out async tests, so
-increasing these waits can cause a retry to start before the previous attempt has cleaned up.
+The UI tests open a Markdown preview and wait up to one minute for its webview to render. This catches webview resource loading failures (for example 401 responses for remote authorities with uppercase letters such as `wsl+Ubuntu`), and any webview resource response with an error status fails the test. Browsers that refuse to register the webview service worker (such as Chromium on Debian 12) cannot load any webview, so the check is skipped there with a pipeline warning.
+
+Extension installation makes at most three attempts, each allowing 30 seconds to click Install, 30 seconds for installation to start, and one minute to wait for completion, with a five-second delay between attempts. These waits total at most 6 minutes 10 seconds, leaving room for setup, the Markdown preview check and cleanup within the default ten-minute test timeout. Mocha does not cancel timed-out async tests, so increasing these waits can cause a retry to start before the previous attempt has cleaned up.
 
 ## Scripts
 
@@ -71,7 +69,7 @@ Platform-specific scripts are provided in the `scripts/` directory to set up the
 
 |Script|Platform|Description|
 |--------|----------|-------------|
-|`run-win32.cmd`|Windows|Runs tests using Edge as the Playwright browser|
+|`run-win32.cmd`|Windows|On x64, installs the WSL release pinned in `build/checksums/wsl.txt` and imports Ubuntu into WSL2, then runs tests using Edge as the Playwright browser|
 |`run-macOS.sh`|macOS|Installs Playwright WebKit and runs tests|
 |`run-ubuntu.sh`|Ubuntu|Sets up X11, Chromium, and Snap daemon, then runs tests|
 |`run-docker.sh`|Linux (Docker)|Builds and runs tests inside a Docker container|
