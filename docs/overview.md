@@ -1,24 +1,42 @@
-# Zombi
+# Zombi proje görünümü
 
-Zombi, yüksek zekâ tabanlı ve senkronize edilmiş bir sistem tanımıdır. Bu proje, sistemin metaverisini, durum akışını, güvenlik ve izin yapılandırmasını tek bir merkezden yönetmeye odaklanır.
+Bu belge, projenin temel amacı, dosya yapısı ve sistem profilini anlatır.
 
-## Hedefler
+## Amaç
+
+Zombi, proje içi tanımlayıcı bilgileri, durum akışını, modül ayrımını ve güvenlik denetimini tek bir konfigürasyon merkezinde toplar.
+
+## Temel hedefler
+
 - Durum takibi
 - Meta veri yönetimi
-- Modül bazlı yapılandırma
-- Güvenlik ve erişim denetimi
-- Doğrulama ve bakım kolaylığı
+- Modül bazlı organizasyon
+- Erişim kontrolü
+- Doğrulama ve sürdürülebilirlik
+- Dijital manifest dosyası olarak kullanılabilirlik
 
 ## Yapı
-- `config/system.yaml`: ana sistem yapılandırması
-- `docs/overview.md`: proje görünümü
-- `README.md`: kullanım ve kısa açıklama
-- `scripts/validate.sh`: sistem doğrulama betiği
+
+- `config/system.toml`: ana TOML tanımı
+- `config/system.yaml`: okunabilir YAML sürümü
+- `docs/overview.md`: kısa görünüm
+- `docs/architecture.md`: mimari açıklama
+- `docs/manifest-spec.md`: alan ve kurallar dokümantasyonu
+- `scripts/validate.sh`: doğrulama betiği
+- `scripts/validate_zombi.py`: Python tabanlı doğrulama aracı
 
 ## Durum
-Aktif ve senkronize.
+
+Sistem aktif ve senkronize konumdadır.
 
 ## Çalıştırma
+
 ```bash
 bash scripts/validate.sh
+```
+
+veya
+
+```bash
+python3 scripts/validate_zombi.py
 ```
